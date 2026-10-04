@@ -1,6 +1,9 @@
 {
   "ExpandedNodes": [
-    ""
+    "",
+    "\\.github",
+    "\\.github\\workflows"
   ],
+  "SelectedNode": "\\.github\\workflows\\azure-auth-test.yml",
   "PreviewInSolutionExplorer": false
 }

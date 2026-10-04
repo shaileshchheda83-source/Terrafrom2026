@@ -1,4 +1,4 @@
-name: Azure Authentication and Resource Audit
+name: Azure Authentication and Resource Audit (with OIDC debug)
 
 on:
   push:
@@ -19,11 +19,48 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout
-      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ---------------------------
+      # OIDC debug step (temporary)
+      # ---------------------------
+      - name: Request and decode OIDC token claims (DEBUG only)
+        id: oidc_debug
+        shell: bash
+        env:
+          AUDIENCE: api://AzureADTokenExchange
+        run: |
+          set -euo pipefail
+
+          echo "Requesting OIDC token for audience: $AUDIENCE"
+          # Request the ID token from the runner OIDC endpoint
+          TOKEN_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=${AUDIENCE}"
+          RAW_RESPONSE=$(curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "$TOKEN_URL")
+
+          # The endpoint usually returns the raw token string. If it returns JSON, try to extract a token field.
+          if echo "$RAW_RESPONSE" | jq -e . >/dev/null 2>&1; then
+            # try common JSON fields that might contain the token
+            ID_TOKEN=$(echo "$RAW_RESPONSE" | jq -r '.value // .id_token // .token // .access_token // .idToken // .token // empty')
+            if [ -z "$ID_TOKEN" ]; then
+              echo "Warning: token not found in JSON response; printing raw response for inspection"
+              echo "$RAW_RESPONSE"
+              exit 1
+            fi
+          else
+            ID_TOKEN="$RAW_RESPONSE"
+          fi
+
+          # Decode JWT payload (base64url)
+          PAYLOAD=$(printf '%s' "$ID_TOKEN" | cut -d. -f2 | tr '_-' '/+' | sed 's/[^A-Za-z0-9+/=]//g' | base64 --decode 2>/dev/null || true)
+
+          echo "---- OIDC claims (debug) ----"
+          echo "$PAYLOAD" | jq '{iss: .iss, aud: .aud, sub: .sub, ref: .ref}'
+
+          # Export the token to later steps if needed (be careful with secrets)
+          echo "id_token<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$ID_TOKEN" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       # ---------------------------------------------------------
       # 2. Azure login using GitHub OIDC
