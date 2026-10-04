@@ -1,0 +1,329 @@
+name: Azure Authentication and Resource Audit
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CORE_OUTPUT: none
+
+jobs:
+  azure-audit:
+    name: Test Azure Authentication and Permissions
+    runs-on: ubuntu-latest
+
+    steps:
+      # ---------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------
+      # 2. Azure login using GitHub OIDC
+      # ---------------------------------------------------------
+      - name: Azure Login - OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # ---------------------------------------------------------
+      # 3. Show Azure identity
+      # ---------------------------------------------------------
+      - name: Show Azure account
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "AZURE ACCOUNT"
+          echo "========================================"
+
+          az account show \
+            --query '{
+              subscriptionId:id,
+              subscriptionName:name,
+              tenantId:tenantId,
+              user:user,
+              state:state
+            }' \
+            --output json
+
+      # ---------------------------------------------------------
+      # 4. List subscriptions available to SPN
+      # ---------------------------------------------------------
+      - name: List accessible subscriptions
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "ACCESSIBLE SUBSCRIPTIONS"
+          echo "========================================"
+
+          az account list \
+            --query '[].{
+              name:name,
+              id:id,
+              tenantId:tenantId,
+              state:state
+            }' \
+            --output table
+
+      # ---------------------------------------------------------
+      # 5. Identify the logged-in service principal
+      # ---------------------------------------------------------
+      - name: Identify Service Principal
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: |
+          echo "========================================"
+          echo "SERVICE PRINCIPAL"
+          echo "========================================"
+
+          echo "Client/Application ID:"
+          echo "$AZURE_CLIENT_ID"
+
+          echo ""
+          echo "Service Principal details:"
+
+          az ad sp show \
+            --id "$AZURE_CLIENT_ID" \
+            --query '{
+              displayName:displayName,
+              appId:appId,
+              objectId:id,
+              accountEnabled:accountEnabled
+            }' \
+            --output json
+
+      # ---------------------------------------------------------
+      # 6. List RBAC permissions for SPN
+      # ---------------------------------------------------------
+      - name: List Service Principal RBAC Roles
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "SERVICE PRINCIPAL RBAC"
+          echo "========================================"
+
+          SP_OBJECT_ID=$(az ad sp show \
+            --id "$AZURE_CLIENT_ID" \
+            --query id \
+            --output tsv)
+
+          echo "Service Principal Object ID:"
+          echo "$SP_OBJECT_ID"
+
+          echo ""
+          echo "Role assignments:"
+
+          az role assignment list \
+            --assignee-object-id "$SP_OBJECT_ID" \
+            --all \
+            --include-inherited \
+            --query '[].{
+              role:roleDefinitionName,
+              scope:scope,
+              principal:principalName
+            }' \
+            --output table
+
+      # ---------------------------------------------------------
+      # 7. Test Resource Group READ permission
+      # ---------------------------------------------------------
+      - name: Test Resource Group Read
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "RESOURCE GROUP READ TEST"
+          echo "========================================"
+
+          if az group list --output table; then
+            echo ""
+            echo "PASS: Service Principal can read resource groups."
+          else
+            echo ""
+            echo "FAIL: Service Principal cannot read resource groups."
+            exit 1
+          fi
+
+      # ---------------------------------------------------------
+      # 8. Azure Resource Graph - basic query
+      # ---------------------------------------------------------
+      - name: Azure Resource Graph - Test
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo "AZURE RESOURCE GRAPH TEST"
+          echo "========================================"
+
+          az extension add \
+            --name resource-graph \
+            --upgrade \
+            --yes
+
+          az graph query \
+            --graph-query "
+              Resources
+              | project
+                  subscriptionId,
+                  resourceGroup,
+                  name,
+                  type,
+                  location
+              | order by type asc
+            " \
+            --first 100 \
+            --output table
+
+          echo ""
+          echo "PASS: Azure Resource Graph query succeeded."
+
+      # ---------------------------------------------------------
+      # 9. Resource inventory by Azure service/type
+      # ---------------------------------------------------------
+      - name: Azure Resource Inventory
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "RESOURCE INVENTORY BY TYPE"
+          echo "========================================"
+
+          az graph query \
+            --graph-query "
+              Resources
+              | summarize resourceCount=count()
+                by type
+              | order by resourceCount desc
+            " \
+            --output table
+
+      # ---------------------------------------------------------
+      # 10. Resource inventory by subscription
+      # ---------------------------------------------------------
+      - name: Resource Count By Subscription
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "RESOURCE COUNT BY SUBSCRIPTION"
+          echo "========================================"
+
+          az graph query \
+            --graph-query "
+              Resources
+              | summarize resourceCount=count()
+                by subscriptionId
+              | order by resourceCount desc
+            " \
+            --output table
+
+      # ---------------------------------------------------------
+      # 11. List Azure resource providers used
+      # ---------------------------------------------------------
+      - name: Azure Resource Providers
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "AZURE RESOURCE PROVIDERS"
+          echo "========================================"
+
+          az provider list \
+            --query '[?registrationState==`Registered`].{
+              namespace:namespace,
+              state:registrationState
+            }' \
+            --output table
+
+      # ---------------------------------------------------------
+      # 12. Test specific common permissions
+      # ---------------------------------------------------------
+      - name: Permission Tests
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "PERMISSION TESTS"
+          echo "========================================"
+
+          PASS=0
+          FAIL=0
+
+          test_permission() {
+            NAME="$1"
+            COMMAND="$2"
+
+            echo ""
+            echo "Testing: $NAME"
+
+            if eval "$COMMAND" > /tmp/permission-test.out 2>&1; then
+              echo "PASS: $NAME"
+              PASS=$((PASS + 1))
+            else
+              echo "FAIL: $NAME"
+              cat /tmp/permission-test.out
+              FAIL=$((FAIL + 1))
+            fi
+          }
+
+          test_permission \
+            "Subscription Read" \
+            "az account show"
+
+          test_permission \
+            "Resource Group Read" \
+            "az group list"
+
+          test_permission \
+            "Resource Graph Read" \
+            "az graph query --graph-query 'Resources | summarize count()'"
+
+          test_permission \
+            "Resource Provider Read" \
+            "az provider list"
+
+          echo ""
+          echo "========================================"
+          echo "PERMISSION TEST SUMMARY"
+          echo "========================================"
+          echo "PASSED: $PASS"
+          echo "FAILED: $FAIL"
+
+          if [ "$FAIL" -gt 0 ]; then
+            exit 1
+          fi
+
+      # ---------------------------------------------------------
+      # 13. Final summary
+      # ---------------------------------------------------------
+      - name: Final Azure Audit Summary
+        shell: bash
+        run: |
+          echo ""
+          echo "========================================"
+          echo "AZURE AUDIT COMPLETE"
+          echo "========================================"
+
+          echo "Authentication: SUCCESS"
+          echo "Azure CLI:       SUCCESS"
+          echo "Resource Groups: TESTED"
+          echo "Resource Graph:  TESTED"
+          echo "RBAC:            LISTED"
+          echo "Resources:       INVENTORIED"
+
+          echo ""
+          echo "If this workflow succeeded, GitHub OIDC"
+          echo "authentication and the configured Azure"
+          echo "RBAC access are working."
