@@ -34,7 +34,9 @@ jobs:
           set -euo pipefail
 
           echo "Requesting OIDC token for audience: $AUDIENCE"
-          # Request the ID token from the runner OIDC endpoint
+          echo "AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}"
+          # request token and print claims if using the action's OIDC step outputs; otherwise decode $ACTIONS_ID_TOKEN if available
+          echo "OIDC debug (if available):"
           TOKEN_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=${AUDIENCE}"
           RAW_RESPONSE=$(curl -sS -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "$TOKEN_URL")
 
